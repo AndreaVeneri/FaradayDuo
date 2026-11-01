@@ -1,0 +1,16 @@
+{
+  "name": "Faraday Duo",
+  "short_name": "Faraday Duo",
+  "description": "Due generatori di sinusoidi (sinistro e destro, 10–150 Hz) per trasduttori e onde di Faraday.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a1114",
+  "theme_color": "#0a1114",
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
