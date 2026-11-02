@@ -1,5 +1,5 @@
 // Cache semplice per l'uso offline. Cambia VERSION quando aggiorni i file.
-const VERSION = 'faraday-duo-v1';
+const VERSION = 'faraday-duo-v2';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
