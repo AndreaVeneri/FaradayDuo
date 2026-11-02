@@ -112,6 +112,7 @@ input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;bac
     <h1>Faraday Duo</h1>
     <div class="tools">
       <span id="stat" class="stat"></span>
+      <button id="btn-gfx" class="chip" type="button">Grafica</button>
       <div id="limit-box" style="width:250px"></div>
       <button id="btn-start" class="btn primary" type="button">Avvia audio</button>
       <button id="btn-panic" class="btn danger" type="button">Muta tutto</button>
@@ -178,7 +179,7 @@ function makeDSP(){
 /* ---------- stato ---------- */
 const S={
   on:false, fA:40, fB:60, aA:-24, aB:-24, ph:0, muteA:true, muteB:true,
-  link:'ratio', n:3, d:2, delta:0.1, linkAmp:true, modSync:false, limit:-12, step:0.1, outOfRange:false,
+  link:'ratio', n:3, d:2, delta:0.1, linkAmp:true, modSync:false, limit:-12, step:0.1, outOfRange:false, gfx:true,
   fmDA:0, fmRA:0.2, amDA:0, amRA:0.2, fmDB:0, fmRB:0.2, amDB:0, amRB:0.2,
   swf1:10, swf2:150, swT:30, swCurve:'log', swMode:'once', swRun:false
 };
@@ -235,7 +236,7 @@ async function initAudio(){
   }
   if(!node){
     const d=new (makeDSP())(ctx.sampleRate);
-    node=ctx.createScriptProcessor(4096,1,2);
+    node=ctx.createScriptProcessor(8192,1,2);
     node.onaudioprocess=e=>{const o=e.outputBuffer;d.render(o.getChannelData(0),o.getChannelData(1),o.length);};
     dsp={post:m=>d.msg(m)}; engine='ScriptProcessor';
   }
@@ -286,12 +287,12 @@ function param(parent,o){
   }
   if(o.extra)o.extra(ex);
   parent.append(row);
-  let ld=null;
+  let ld=null,lk='';
   binds.push(()=>{
     const dis=o.disabled?o.disabled():false;
-    if(!o.log){const a=lo(),b=hi();if(rng.min!=a)rng.min=a;if(rng.max!=b)rng.max=b;}
-    if(document.activeElement!==rng)rng.value=toPos(S[o.key]);
-    if(document.activeElement!==num)num.value=S[o.key].toFixed(dec);
+    const kk=S[o.key]+'|'+lo()+'|'+hi();
+    if(kk!==lk){lk=kk;if(!o.log){rng.min=lo();rng.max=hi();}rng.value=toPos(S[o.key]);}
+    if(document.activeElement!==num){const t=S[o.key].toFixed(dec);if(num.value!==t)num.value=t;}
     if(dis!==ld){ld=dis;rng.disabled=num.disabled=dis;row.classList.toggle('off',dis);row.querySelectorAll('button').forEach(b=>b.disabled=dis);}
   });
 }
@@ -420,7 +421,7 @@ function preview(){
   for(let i=0;i<LEN;i++){pvL[i]=gA*Math.sin(wA*i);pvR[i]=gB*Math.sin(wB*i+p);}
 }
 function fit(c){
-  const r=c.getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,2);
+  const r=c.getBoundingClientRect(),dpr=1;
   const w=Math.round(r.width*dpr),h=Math.round(r.height*dpr);
   if(c.width!==w)c.width=w; if(c.height!==h)c.height=h;
   return dpr;
@@ -468,16 +469,25 @@ function drawLissa(L,R,live){
   g.moveTo(cx,cy-rad);g.lineTo(cx,cy+rad);g.moveTo(cx-rad,cy);g.lineTo(cx+rad,cy);g.stroke();
   g.strokeStyle=C.grid2;g.beginPath();g.arc(cx,cy,rad,0,Math.PI*2);g.stroke();
   g.beginPath();
-  for(let i=0;i<M;i+=2){const x=cx+L[s+i]*sc*rad,y=cy-R[s+i]*sc*rad;if(i)g.lineTo(x,y);else g.moveTo(x,y);}
+  for(let i=0;i<M;i+=4){const x=cx+L[s+i]*sc*rad,y=cy-R[s+i]*sc*rad;if(i)g.lineTo(x,y);else g.moveTo(x,y);}
   g.strokeStyle=C.fg;g.lineWidth=1.6*dpr;g.lineJoin='round';g.globalAlpha=live?0.95:0.6;g.stroke();g.globalAlpha=1;
 }
-let lastDraw=0;
+let lastDraw=0,touchUntil=0,gfxCleared=false;
+const bump=()=>{touchUntil=performance.now()+500;};
+document.addEventListener('pointerdown',bump,{passive:true});
+document.addEventListener('pointermove',e=>{if(e.buttons)bump();},{passive:true});
+document.addEventListener('input',bump,{passive:true,capture:true});
 function frame(ts){
   requestAnimationFrame(frame);
   sweepStep();
   if(dirty){dirty=false;refresh();}
-  if(ts-lastDraw<30)return;
+  if(ts-lastDraw<(performance.now()<touchUntil?160:50))return;
   lastDraw=ts;
+  if(!S.gfx){
+    if(!gfxCleared){for(const c of [cv.scope,cv.lissa])c.getContext('2d').clearRect(0,0,c.width,c.height);gfxCleared=true;}
+    return;
+  }
+  gfxCleared=false;
   const live=!!(ctx&&ctx.state==='running'&&bufL);
   let L,R,sr;
   if(live){anL.getFloatTimeDomainData(bufL);anR.getFloatTimeDomainData(bufR);L=bufL;R=bufR;sr=ctx.sampleRate;}
@@ -497,6 +507,9 @@ binds.push(()=>{
   setT(statEl,!ctx?'fermo · parte in silenzio':(S.on?'attivo · ':'sospeso · ')+engine+' · '+Math.round(ctx.sampleRate)+' Hz');
 });
 btnStart.onclick=()=>{if(S.on)stopAudio();else startAudio();};
+const gfxB=$('#btn-gfx');
+gfxB.onclick=()=>{S.gfx=!S.gfx;refresh();};
+binds.push(()=>gfxB.classList.toggle('on',S.gfx));
 $('#btn-panic').onclick=()=>{S.muteA=true;S.muteB=true;S.swRun=false;update();};
 document.addEventListener('keydown',e=>{if(e.key==='Escape')$('#btn-panic').click();});
 
