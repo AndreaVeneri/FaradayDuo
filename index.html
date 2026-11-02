@@ -226,23 +226,45 @@ async function initAudio(){
   anL.fftSize=anR.fftSize=LEN; anL.smoothingTimeConstant=anR.smoothingTimeConstant=0;
   const split=ctx.createChannelSplitter(2), sink=ctx.createGain(); sink.gain.value=0;
   anL.connect(sink); anR.connect(sink); sink.connect(ctx.destination);
-  let node=null;
-  if(ctx.audioWorklet&&window.AudioWorkletNode){
-    try{
-      const src='const DuoDSP=('+makeDSP.toString()+')();registerProcessor("duo",class extends AudioWorkletProcessor{constructor(){super();this.d=new DuoDSP(sampleRate);this.port.onmessage=e=>this.d.msg(e.data);}process(i,o){const c=o[0];this.d.render(c[0],c[1]||c[0],c[0].length);return true;}});';
-      const url=URL.createObjectURL(new Blob([src],{type:'application/javascript'}));
-      await ctx.audioWorklet.addModule(url);
-      node=new AudioWorkletNode(ctx,'duo',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
-      dsp={post:m=>node.port.postMessage(m)}; engine='AudioWorklet';
-    }catch(e){node=null;}
-  }
-  if(!node){
-    const d=new (makeDSP())(ctx.sampleRate);
-    node=ctx.createScriptProcessor(8192,1,2);
-    node.onaudioprocess=e=>{const o=e.outputBuffer;d.render(o.getChannelData(0),o.getChannelData(1),o.length);};
-    dsp={post:m=>d.msg(m)}; engine='ScriptProcessor';
-  }
-  node.connect(master); node.connect(split);
+  /* motore nativo: oscillatori interni di Safari, girano sul thread audio e non risentono dei tocchi */
+  const merger=ctx.createChannelMerger(2);
+  const T0=ctx.currentTime+0.05, TC_F=0.03, TC_G=0.035, NUDGE=0.1;
+  const V=[0,1].map(i=>{
+    const v={i,out:ctx.createGain(),am:ctx.createGain(),off:0,init:false};
+    v.out.gain.value=0; v.am.connect(v.out); v.out.connect(merger,0,i);
+    v.build=(t)=>{
+      for(const n of [v.osc,v.fl,v.al]){if(n){try{n.stop();n.disconnect();}catch(e){}}}
+      v.osc=ctx.createOscillator(); v.osc.type='sine'; v.osc.connect(v.am);
+      v.fl=ctx.createOscillator(); v.fg=ctx.createGain(); v.fl.connect(v.fg); v.fg.connect(v.osc.frequency);
+      v.al=ctx.createOscillator(); v.ag=ctx.createGain(); v.al.connect(v.ag); v.ag.connect(v.am.gain);
+      v.osc.start(t); v.fl.start(t); v.al.start(t); v.off=0; v.init=false;
+    };
+    v.build(T0);
+    return v;
+  });
+  const tn=ctx.currentTime;
+  dsp={post:m=>{
+    if(m.t==='reset'){const t=ctx.currentTime+0.03;V.forEach(v=>v.build(t));return;}
+    if(m.t!=='set')return;
+    const v=V[m.ch], t=ctx.currentTime, g=m.mute?0:Math.min(m.g,m.lim);
+    if(!v.init){v.init=true;v.osc.frequency.value=m.f;v.fg.gain.value=m.fmD;v.fl.frequency.value=m.fmR;v.ag.gain.value=m.amD/2;v.al.frequency.value=m.amR;v.am.gain.value=1-m.amD/2;}
+    else{
+      v.osc.frequency.setTargetAtTime(m.f,t,TC_F);
+      v.fg.gain.setTargetAtTime(m.fmD,t,TC_F); v.fl.frequency.setTargetAtTime(m.fmR,t,TC_F);
+      v.ag.gain.setTargetAtTime(m.amD/2,t,TC_F); v.al.frequency.setTargetAtTime(m.amR,t,TC_F);
+      v.am.gain.setTargetAtTime(1-m.amD/2,t,TC_F);
+    }
+    v.out.gain.setTargetAtTime(g,t,TC_G);
+    /* fase: breve spostamento di frequenza che somma esattamente lo scarto richiesto, senza salti */
+    const target=m.ph/360; let d=target-v.off; d-=Math.round(d);
+    if(Math.abs(d)>1e-6){
+      const cs=ctx.createConstantSource(); cs.offset.value=d/NUDGE; cs.connect(v.osc.frequency);
+      cs.start(t); cs.stop(t+NUDGE+0.02); cs.onended=()=>{try{cs.disconnect();}catch(e){}};
+      v.off=target;
+    }
+  }};
+  engine='Oscillatori nativi';
+  const node=merger;
   split.connect(anL,0,0); split.connect(anR,1,0);
   bufL=new Float32Array(anL.fftSize); bufR=new Float32Array(anR.fftSize);
 }
