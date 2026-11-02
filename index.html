@@ -148,9 +148,9 @@ const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=nu
 /* ---------- DSP: accumulatori di fase in double, parametri lisciati per campione ---------- */
 function makeDSP(){
   const TAU=Math.PI*2;
-  class Ch{constructor(){this.ph=0;this.f=40;this.fT=40;this.g=0;this.gT=0;this.off=0;this.offT=0;this.fmD=0;this.fmR=0.2;this.amD=0;this.amR=0.2;this.lf=0;this.la=0;}}
+  class Ch{constructor(){this.ph=0;this.f=40;this.f1=40;this.fT=40;this.g=0;this.g1=0;this.gT=0;this.off=0;this.off1=0;this.offT=0;this.fmD=0;this.fmR=0.2;this.amD=0;this.amR=0.2;this.lf=0;this.la=0;}}
   return class DuoDSP{
-    constructor(sr){this.sr=sr;this.c=[new Ch(),new Ch()];this.kf=1-Math.exp(-1/(sr*0.05));this.kg=1-Math.exp(-1/(sr*0.06));}
+    constructor(sr){this.sr=sr;this.c=[new Ch(),new Ch()];this.kf=1-Math.exp(-1/(sr*0.03));this.kg=1-Math.exp(-1/(sr*0.035));}
     msg(m){
       if(m.t==='set'){const c=this.c[m.ch];c.fT=m.f;c.gT=m.mute?0:Math.min(m.g,m.lim);c.offT=m.ph/360;c.fmD=m.fmD;c.fmR=m.fmR;c.amD=m.amD;c.amR=m.amR;}
       else if(m.t==='reset'){for(const c of this.c){c.ph=0;c.lf=0;c.la=0;}}
@@ -159,17 +159,19 @@ function makeDSP(){
       const out=[L,R],sr=this.sr,kf=this.kf,kg=this.kg;
       for(let k=0;k<2;k++){
         const c=this.c[k],o=out[k];
-        let ph=c.ph,f=c.f,g=c.g,off=c.off,lf=c.lf,la=c.la;
+        let ph=c.ph,f=c.f,f1=c.f1,g=c.g,g1=c.g1,off=c.off,off1=c.off1,lf=c.lf,la=c.la;
         const fT=c.fT,gT=c.gT,offT=c.offT,fmD=c.fmD,amD=c.amD,dlf=c.fmR/sr,dla=c.amR/sr;
         for(let i=0;i<n;i++){
-          f+=(fT-f)*kf; g+=(gT-g)*kg;
-          let d=offT-off; d-=Math.round(d); off+=d*kf; off-=Math.floor(off);
+          /* due filtri in cascata: ogni variazione parte e arriva senza spigoli */
+          f1+=(fT-f1)*kf; f+=(f1-f)*kf; g1+=(gT-g1)*kg; g+=(g1-g)*kg;
+          let d=offT-off1; d-=Math.round(d); off1+=d*kf; off1-=Math.floor(off1);
+          d=off1-off; d-=Math.round(d); off+=d*kf; off-=Math.floor(off);
           let fi=f+fmD*Math.sin(TAU*lf); if(fi<0)fi=0;
           ph+=fi/sr; ph-=Math.floor(ph);
           lf+=dlf; lf-=Math.floor(lf); la+=dla; la-=Math.floor(la);
           o[i]=Math.sin(TAU*(ph+off))*g*(1-amD*(0.5-0.5*Math.cos(TAU*la)));
         }
-        c.ph=ph;c.f=f;c.g=g;c.off=off;c.lf=lf;c.la=la;
+        c.ph=ph;c.f=f;c.f1=f1;c.g=g;c.g1=g1;c.off=off;c.off1=off1;c.lf=lf;c.la=la;
       }
     }
   };
@@ -271,10 +273,10 @@ function param(parent,o){
   if(o.inline)row.append(lab,rng,num);
   else{const pt=el('div','pt');pt.append(lab,ex,num);row.append(pt,rng);}
   const lo=()=>o.min, hi=()=>o.maxFn?o.maxFn():o.max, dec=o.dec==null?2:o.dec;
-  if(o.log){rng.min=0;rng.max=1000;rng.step=1;}else rng.step=o.step||'any';
-  const toPos=v=>o.log?1000*Math.log(v/lo())/Math.log(hi()/lo()):v;
-  const fromPos=p=>o.log?lo()*Math.pow(hi()/lo(),p/1000):p;
-  const set=v=>{if(!isFinite(v))return;v=clamp(v,lo(),hi());S[o.key]=o.log?Math.round(v*100)/100:Math.round(v*1e4)/1e4;update();};
+  if(o.log){rng.min=0;rng.max=100000;rng.step='any';}else rng.step='any';
+  const toPos=v=>o.log?100000*Math.log(v/lo())/Math.log(hi()/lo()):v;
+  const fromPos=p=>o.log?lo()*Math.pow(hi()/lo(),p/100000):p;
+  const set=v=>{if(!isFinite(v))return;v=clamp(v,lo(),hi());S[o.key]=Math.round(v*1e4)/1e4;update();};
   rng.addEventListener('input',()=>set(fromPos(parseFloat(rng.value))));
   num.addEventListener('change',()=>{set(parseFloat(num.value));num.value=S[o.key].toFixed(dec);});
   num.addEventListener('keydown',e=>{if(e.key==='Enter')num.blur();});
