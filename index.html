@@ -73,45 +73,109 @@ const $=s=>document.querySelector(s);
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
 const lin=db=>db<=AMIN+0.1?0:Math.pow(10,db/20);
 const S=[{f:40,a:-24,ph:0,mute:true},{f:60,a:-24,ph:0,mute:true}];
-let ctx=null,master=null,V=[],on=false;
-const TCF=0.03,TCG=0.035,NUDGE=0.1;
+let ctx=null,master=null,eng=null,on=false;
+const TCF=0.03,TCG=0.035,NUDGE=0.1,CAP=lin(AMAX);
 
-/* ---- audio: oscillatori interni di Safari, fase con piccolo spostamento di frequenza ---- */
-function init(){
-  const AC=window.AudioContext||window.webkitAudioContext;
-  try{if(navigator.audioSession)navigator.audioSession.type='playback';}catch(e){}
-  ctx=new AC({latencyHint:'playback'});
-  master=ctx.createGain();master.gain.value=0;master.connect(ctx.destination);
+/* ---- audio ----
+   Motore principale: AudioWorklet. Tutto avviene sul thread audio: accumulatore di fase in double,
+   frequenza, ampiezza e fase lisciate per campione. Nessun nodo viene creato durante l'uso.
+   Il corpo della funzione e' anche il sorgente del worklet (viene serializzato in un Blob). */
+function workletBody(){
+  class FD extends AudioWorkletProcessor{
+    constructor(){
+      super();
+      const mk=()=>({ph:0,f:40,tf:40,a:0,ta:0,o:0,to:0});
+      this.v=[mk(),mk()];
+      const c=t=>1-Math.exp(-1/(t*sampleRate));
+      this.kf=c(0.03);this.ka=c(0.035);this.ko=c(0.04);
+      this.port.onmessage=e=>{
+        const m=e.data,v=this.v[m.i];
+        if(!v||!isFinite(m.f)||!isFinite(m.a)||!isFinite(m.ph))return;
+        v.tf=Math.min(150,Math.max(10,m.f));
+        v.ta=Math.min(m.cap,Math.max(0,m.a));
+        v.to=m.ph;
+        if(m.snap){v.f=v.tf;v.o=v.to;}
+      };
+    }
+    process(inputs,outputs){
+      const out=outputs[0],TP=2*Math.PI,sr=sampleRate;
+      for(let c=0;c<2&&c<out.length;c++){
+        const v=this.v[c],ch=out[c],n=ch.length;
+        let ph=v.ph,f=v.f,a=v.a,o=v.o;
+        const tf=v.tf,ta=v.ta,to=v.to,kf=this.kf,ka=this.ka,ko=this.ko;
+        for(let k=0;k<n;k++){
+          f+=(tf-f)*kf;
+          a+=(ta-a)*ka;
+          let d=to-o;d-=Math.round(d);
+          o+=d*ko;
+          ph+=f/sr;ph-=Math.floor(ph);
+          ch[k]=a*Math.sin(TP*(ph+o));
+        }
+        if(ta===0&&a<1e-7)a=0;
+        o-=Math.floor(o);
+        v.ph=ph;v.f=f;v.a=a;v.o=o;
+      }
+      return true;
+    }
+  }
+  registerProcessor('fd',FD);
+}
+async function makeWorklet(){
+  const url=URL.createObjectURL(new Blob(['('+workletBody+')()'],{type:'application/javascript'}));
+  try{await ctx.audioWorklet.addModule(url);}finally{URL.revokeObjectURL(url);}
+  const node=new AudioWorkletNode(ctx,'fd',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
+  node.connect(master);
+  return {kind:'worklet',push(i,snap){
+    const s=S[i];
+    node.port.postMessage({i,f:s.f,a:s.mute?0:lin(Math.min(s.a,AMAX)),ph:s.ph/360,cap:CAP,snap:!!snap});
+  }};
+}
+/* Ripiego se AudioWorklet non c'e': oscillatori nativi, fase con piccolo spostamento di frequenza. */
+function makeNative(){
   const mg=ctx.createChannelMerger(2);mg.connect(master);
   const t0=ctx.currentTime+0.05;
-  V=[0,1].map(i=>{
+  const V=[0,1].map(i=>{
     const o=ctx.createOscillator();o.type='sine';o.frequency.value=S[i].f;
     const g=ctx.createGain();g.gain.value=0;o.connect(g);g.connect(mg,0,i);o.start(t0);
     return {o,g,off:0};
   });
+  return {kind:'native',push(i){
+    const v=V[i],s=S[i],t=ctx.currentTime;
+    v.o.frequency.setTargetAtTime(s.f,t,TCF);
+    v.g.gain.setTargetAtTime(s.mute?0:lin(Math.min(s.a,AMAX)),t,TCG);
+    const tg=s.ph/360;let d=tg-v.off;d-=Math.round(d);
+    if(Math.abs(d)>1e-6){
+      const cs=ctx.createConstantSource(),gn=ctx.createGain(),N=64,cv=new Float32Array(N);
+      for(let k=0;k<N;k++)cv[k]=(0.5-0.5*Math.cos(2*Math.PI*k/(N-1)))*2*d/NUDGE;
+      gn.gain.value=0;cs.connect(gn);gn.connect(v.o.frequency);
+      gn.gain.setValueCurveAtTime(cv,t,NUDGE);
+      cs.start(t);cs.stop(t+NUDGE+0.02);cs.onended=()=>{try{cs.disconnect();gn.disconnect();}catch(e){}};
+      v.off=tg;
+    }
+  }};
 }
-function push(i){
-  if(!ctx)return;
-  const v=V[i],s=S[i],t=ctx.currentTime;
-  v.o.frequency.setTargetAtTime(s.f,t,TCF);
-  v.g.gain.setTargetAtTime(s.mute?0:lin(Math.min(s.a,AMAX)),t,TCG);
-  const tg=s.ph/360;let d=tg-v.off;d-=Math.round(d);
-  if(Math.abs(d)>1e-6){
-    const cs=ctx.createConstantSource(),gn=ctx.createGain(),N=64,cv=new Float32Array(N);
-    for(let k=0;k<N;k++)cv[k]=(0.5-0.5*Math.cos(2*Math.PI*k/(N-1)))*2*d/NUDGE;
-    gn.gain.value=0;cs.connect(gn);gn.connect(v.o.frequency);
-    gn.gain.setValueCurveAtTime(cv,t,NUDGE);
-    cs.start(t);cs.stop(t+NUDGE+0.02);cs.onended=()=>{try{cs.disconnect();gn.disconnect();}catch(e){}};
-    v.off=tg;
-  }
-}
+function push(i,snap){if(eng)eng.push(i,snap);}
+let starting=false;
 async function start(){
+  if(starting)return;
+  starting=true;
   try{
-    if(!ctx)init();
-    await ctx.resume();
+    if(!ctx){
+      const AC=window.AudioContext||window.webkitAudioContext;
+      try{if(navigator.audioSession)navigator.audioSession.type='playback';}catch(e){}
+      ctx=new AC({latencyHint:'playback'});
+      master=ctx.createGain();master.gain.value=0;master.connect(ctx.destination);
+    }
+    const rp=ctx.resume(); /* subito, dentro il gesto dell'utente */
+    if(!eng){
+      try{eng=await makeWorklet();}catch(e){eng=makeNative();}
+      push(0,true);push(1,true);
+    }
+    await rp;
     on=true;master.gain.setTargetAtTime(1,ctx.currentTime,0.08);
     push(0);push(1);
-  }catch(e){$('#st').textContent='audio non disponibile';return;}
+  }catch(e){$('#st').textContent='audio non disponibile';starting=false;return;}
+  starting=false;
   ui();
 }
 function muteAll(){S[0].mute=S[1].mute=true;push(0);push(1);ui();}
@@ -130,7 +194,7 @@ function build(){
     const hd=document.createElement('div');hd.className='hd';
     hd.innerHTML='<h2>'+(i?'Destro · B':'Sinistro · A')+'</h2>';
     const mb=document.createElement('button');mb.type='button';mb.className='mute';
-    mb.onclick=()=>{S[i].mute=!S[i].mute;push(i);ui();};
+    mb.onclick=()=>{S[i].mute=!S[i].mute;push(i);ui(i);};
     hd.append(mb);c.append(hd);
     const e={mb,r:{}};
     rows.forEach(r=>{
@@ -156,33 +220,36 @@ function build(){
 function set(i,r,v){
   v=clamp(v,r.min,r.max);
   S[i][r.k]=v;
-  push(i);ui();
+  push(i);ui(i);
 }
-function ui(){
+function ui(only){
   want();
   $('#go').textContent=on?'Audio attivo':'Avvia audio';
   $('#go').classList.toggle('on',on);
   $('#st').textContent=on?'attivo':'fermo · parte in silenzio';
   [0,1].forEach(i=>{
+    if(only!==undefined&&only!==i)return;
     const e=els[i],s=S[i];
     e.mb.textContent=s.mute?'Muto':'Suona';
     e.mb.classList.toggle('m',s.mute);
     rows.forEach(r=>{
       const x=e.r[r.k];
       if(Math.abs(parseFloat(x.sl.value)-s[r.k])>1e-6)x.sl.value=s[r.k];
-      x.val.innerHTML=s[r.k].toFixed(r.dec).replace('-','−')+'<small>'+r.unit+'</small>';
+      const h=s[r.k].toFixed(r.dec).replace('-','−')+'<small>'+r.unit+'</small>';
+      if(x.h!==h){x.h=h;x.val.innerHTML=h;}
     });
   });
 }
 /* ---- visualizzatore: disegnato dai parametri, nessun legame con l'audio ---- */
 const cvS=$('#scope'),cvL=$('#lis'),gS=cvS.getContext('2d'),gL=cvL.getContext('2d');
 const COL=['#5cc8e8','#ff8c66'];
-let need=false;
+let need=false,dragging=false,lastDraw=0;const DRAG_MS=66;
 const amp=i=>Math.min(1,lin(Math.min(S[i].a,AMAX))/lin(AMAX));
 function fit(cv){const d=Math.min(window.devicePixelRatio||1,2),w=Math.round(cv.clientWidth*d),h=Math.round(cv.clientHeight*d);if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}}
 function rat(x){for(let d=1;d<=16;d++){const n=Math.round(x*d);if(n>=1&&Math.abs(n/d-x)<=0.002*x)return [n,d];}return null;}
-function draw(){
-  need=false;fit(cvS);fit(cvL);
+function draw(ts){
+  if(dragging&&ts-lastDraw<DRAG_MS){requestAnimationFrame(draw);return;}
+  need=false;lastDraw=ts;fit(cvS);fit(cvL);
   let W=cvS.width,H=cvS.height;gS.clearRect(0,0,W,H);
   gS.strokeStyle='#27383e';gS.lineWidth=1;gS.beginPath();gS.moveTo(0,H/2);gS.lineTo(W,H/2);gS.stroke();
   const win=3/Math.min(S[0].f,S[1].f);
@@ -197,12 +264,17 @@ function draw(){
   gL.strokeStyle='#27383e';gL.lineWidth=1;gL.beginPath();gL.moveTo(0,H/2);gL.lineTo(W,H/2);gL.moveTo(W/2,0);gL.lineTo(W/2,H);gL.stroke();
   const r=rat(S[1].f/S[0].f),T=r?r[1]/S[0].f:3/S[0].f,sc=Math.min(W,H)*0.42,ax=amp(0),ay=amp(1);
   gL.globalAlpha=(S[0].mute||S[1].mute)?0.3:1;gL.strokeStyle='#e6f0f2';gL.lineWidth=2;gL.beginPath();
-  for(let k=0;k<=1600;k++){const t=k/1600*T,x=W/2+Math.sin(2*Math.PI*(S[0].f*t+S[0].ph/360))*ax*sc,y=H/2-Math.sin(2*Math.PI*(S[1].f*t+S[1].ph/360))*ay*sc;k?gL.lineTo(x,y):gL.moveTo(x,y);}
+  const NP=dragging?500:1600;
+  for(let k=0;k<=NP;k++){const t=k/NP*T,x=W/2+Math.sin(2*Math.PI*(S[0].f*t+S[0].ph/360))*ax*sc,y=H/2-Math.sin(2*Math.PI*(S[1].f*t+S[1].ph/360))*ay*sc;k?gL.lineTo(x,y):gL.moveTo(x,y);}
   gL.stroke();gL.globalAlpha=1;
   $('#rt').textContent='Lissajous · B/A '+(r?r[0]+':'+r[1]:(S[1].f/S[0].f).toFixed(3));
 }
 const want=()=>{if(!need){need=true;requestAnimationFrame(draw);}};
 window.addEventListener('resize',want);
+/* durante il trascinamento il visualizzatore scende a ~15 fps con meno punti */
+document.addEventListener('pointerdown',e=>{if(e.target&&e.target.type==='range')dragging=true;});
+const endDrag=()=>{if(dragging){dragging=false;want();}};
+document.addEventListener('pointerup',endDrag);document.addEventListener('pointercancel',endDrag);
 build();ui();want();
 $('#go').onclick=start;
 $('#stop').onclick=muteAll;

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Faraday Duo · diagnostica click</title>
+<style>
+:root{--bg:#0a1114;--fg:#e6f0f2;--mut:#8fa6ac;--pan:#121c20;--line:#27383e;--a:#5cc8e8;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:14px;background:var(--bg);color:var(--fg);font:16px/1.35 system-ui,-apple-system,sans-serif;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+h1{font-size:18px;margin:0 0 4px}p{margin:4px 0 10px;color:var(--mut);font-size:14px}
+fieldset{border:1px solid var(--line);border-radius:12px;margin:0 0 10px;padding:8px 10px;background:var(--pan)}
+legend{color:var(--mut);font-size:13px;text-transform:uppercase;letter-spacing:.08em;padding:0 6px}
+button{font:inherit;font-weight:700;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:12px;min-height:52px;padding:0 14px;margin:3px;touch-action:manipulation}
+button.sel{background:var(--a);color:var(--bg);border-color:var(--a)}
+#play.on{background:#ff8c66;color:var(--bg);border-color:#ff8c66}
+#pad{height:150px;border:2px dashed var(--line);border-radius:14px;display:flex;align-items:center;justify-content:center;color:var(--mut);margin-bottom:10px}
+#info{font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;color:var(--mut)}
+#cv{width:100%;height:120px;display:none;background:var(--pan);border-radius:12px;margin-bottom:10px}
+</style>
+</head>
+<body>
+<h1>Diagnostica click · un oscillatore, 40 Hz</h1>
+<p>1) Scegli le varianti. 2) "Avvia" ricrea l'audio (parte muto). 3) "Suona" (-30 dB). Ascolta toccando l'area tratteggiata e variando i test automatici. Cambiare una variante riavvia l'audio.</p>
+
+<fieldset><legend>Motore</legend><div id="g-eng"></div></fieldset>
+<fieldset><legend>Latenza (latencyHint)</legend><div id="g-lat"></div></fieldset>
+<fieldset><legend>Sample rate</legend><div id="g-sr"></div></fieldset>
+<fieldset><legend>Carico e test automatici</legend><div id="g-t"></div></fieldset>
+
+<div>
+  <button id="start" type="button">Avvia</button>
+  <button id="play" type="button">Suona</button>
+  <button id="stop" type="button">Stop</button>
+</div>
+<canvas id="cv"></canvas>
+<div id="pad">Area tocco: tocca e trascina qui (nessun gestore evento)</div>
+<div id="info"></div>
+
+<script>
+(()=>{
+'use strict';
+const $=s=>document.querySelector(s);
+const O={eng:'nat-tc',lat:'playback',sr:'0',vis:false,busy:false,af:false,aa:false,ap:false,sil:false};
+const GROUPS={
+ 'g-eng':{k:'eng',o:[['nat-tc','Nativo setTargetAtTime'],['nat-ramp','Nativo linearRamp'],['worklet','AudioWorklet']]},
+ 'g-lat':{k:'lat',o:[['playback','playback'],['interactive','interactive'],['balanced','balanced']]},
+ 'g-sr':{k:'sr',o:[['0','default'],['44100','44100'],['48000','48000']]}
+};
+const TOGGLES=[['sil','Silenzio (gain 0): solo il tocco'],['vis','Visualizzatore attivo'],['busy','Carico main thread (30 ms ogni 100 ms)'],['af','Auto: frequenza ogni 300 ms'],['aa','Auto: ampiezza ogni 300 ms'],['ap','Auto: fase ogni 300 ms']];
+function btn(parent,label,on,fn){const b=document.createElement('button');b.type='button';b.textContent=label;b.classList.toggle('sel',on);b.onclick=fn;parent.append(b);return b;}
+function renderGroups(){
+  for(const id in GROUPS){const g=GROUPS[id],el=$('#'+id);el.textContent='';
+    g.o.forEach(([v,l])=>btn(el,l,O[g.k]===v,()=>{O[g.k]=v;renderGroups();if(ctx)startAudio();}));}
+  const t=$('#g-t');t.textContent='';
+  TOGGLES.forEach(([k,l])=>btn(t,l,O[k],()=>{O[k]=!O[k];renderGroups();applyLoads();if(k==='sil'&&ctx)pushLevel();}));
+}
+let ctx=null,master=null,eng=null,playing=false,node=null,osc=null,gain=null,vals={f:40,a:0.0316,ph:0};
+const LEV=Math.pow(10,-30/20);
+function wbody(){
+  class P extends AudioWorkletProcessor{
+    constructor(){super();this.ph=0;this.f=40;this.tf=40;this.a=0;this.ta=0;this.o=0;this.to=0;
+      const c=t=>1-Math.exp(-1/(t*sampleRate));this.kf=c(0.03);this.ka=c(0.035);this.ko=c(0.04);
+      this.port.onmessage=e=>{const m=e.data;this.tf=m.f;this.ta=m.a;this.to=m.ph;};}
+    process(i,out){const L=out[0][0],R=out[0][1];let {ph,f,a,o}=this;
+      for(let k=0;k<L.length;k++){f+=(this.tf-f)*this.kf;a+=(this.ta-a)*this.ka;let d=this.to-o;d-=Math.round(d);o+=d*this.ko;
+        ph+=f/sampleRate;ph-=Math.floor(ph);const y=a*Math.sin(2*Math.PI*(ph+o));L[k]=y;if(R)R[k]=y;}
+      if(this.ta===0&&a<1e-7)a=0;o-=Math.floor(o);this.ph=ph;this.f=f;this.a=a;this.o=o;return true;}
+  }
+  registerProcessor('p',P);
+}
+async function startAudio(){
+  stopAudio();
+  const AC=window.AudioContext||window.webkitAudioContext;
+  const opt={latencyHint:O.lat};if(O.sr!=='0')opt.sampleRate=+O.sr;
+  try{ctx=new AC(opt);}catch(e){ctx=new AC({latencyHint:O.lat});}
+  master=ctx.createGain();master.gain.value=1;master.connect(ctx.destination);
+  const rp=ctx.resume();
+  if(O.eng==='worklet'){
+    const url=URL.createObjectURL(new Blob(['('+wbody+')()'],{type:'application/javascript'}));
+    try{await ctx.audioWorklet.addModule(url);}catch(e){$('#info').textContent='worklet non disponibile: '+e;return;}finally{URL.revokeObjectURL(url);}
+    node=new AudioWorkletNode(ctx,'p',{numberOfInputs:0,outputChannelCount:[2]});node.connect(master);
+  }else{
+    osc=ctx.createOscillator();osc.frequency.value=vals.f;gain=ctx.createGain();gain.gain.value=0;
+    osc.connect(gain);gain.connect(master);osc.start();
+  }
+  await rp;pushLevel(true);applyLoads();
+}
+function stopAudio(){playing=false;$('#play').classList.remove('on');$('#play').textContent='Suona';
+  try{if(ctx)ctx.close();}catch(e){}ctx=master=node=osc=gain=null;}
+function level(){return playing&&!O.sil?vals.a:0;}
+function pushLevel(snap){
+  if(!ctx)return;const t=ctx.currentTime,a=level();
+  if(node){node.port.postMessage({f:vals.f,a,ph:vals.ph});return;}
+  if(!gain)return;
+  if(O.eng==='nat-ramp'){
+    gain.gain.cancelScheduledValues(t);gain.gain.setValueAtTime(gain.gain.value,t);gain.gain.linearRampToValueAtTime(a,t+0.05);
+    osc.frequency.cancelScheduledValues(t);osc.frequency.setValueAtTime(osc.frequency.value,t);osc.frequency.linearRampToValueAtTime(vals.f,t+0.05);
+  }else{gain.gain.setTargetAtTime(a,t,0.035);osc.frequency.setTargetAtTime(vals.f,t,0.03);}
+}
+let off=0;
+function nudgePhase(){
+  if(node){vals={...vals,ph:(vals.ph+0.25)%1};pushLevel();return;}
+  if(!osc)return;
+  const d=0.25,t=ctx.currentTime,N=64,cv=new Float32Array(N),cs=ctx.createConstantSource(),gn=ctx.createGain();
+  for(let k=0;k<N;k++)cv[k]=(0.5-0.5*Math.cos(2*Math.PI*k/(N-1)))*2*d/0.1;
+  gn.gain.value=0;cs.connect(gn);gn.connect(osc.frequency);gn.gain.setValueCurveAtTime(cv,t,0.1);
+  cs.start(t);cs.stop(t+0.12);cs.onended=()=>{try{cs.disconnect();gn.disconnect();}catch(e){}};
+}
+let tmr=null,busyT=null,raf=0,flip=false;
+function applyLoads(){
+  clearInterval(tmr);clearInterval(busyT);
+  tmr=setInterval(()=>{if(!ctx||!playing)return;flip=!flip;
+    if(O.af)vals={...vals,f:flip?40:44};
+    if(O.aa)vals={...vals,a:flip?LEV:LEV*0.5};
+    if(O.ap)nudgePhase();
+    if(O.af||O.aa)pushLevel();},300);
+  busyT=setInterval(()=>{if(!O.busy)return;const e=performance.now()+30;while(performance.now()<e){Math.sin(e);}},100);
+  $('#cv').style.display=O.vis?'block':'none';
+}
+/* visualizzatore di prova: disegno pesante in rAF */
+const cv=$('#cv'),g=cv.getContext('2d');let last=0,maxGap=0,gapT=performance.now();
+function frame(ts){
+  raf=requestAnimationFrame(frame);
+  if(last){const d=ts-last;if(d>maxGap)maxGap=d;}last=ts;
+  if(O.vis){const d=Math.min(devicePixelRatio||1,2),w=cv.clientWidth*d,h=cv.clientHeight*d;if(cv.width!==w){cv.width=w;cv.height=h;}
+    g.clearRect(0,0,w,h);g.strokeStyle='#5cc8e8';g.lineWidth=2;g.beginPath();
+    for(let k=0;k<=1600;k++){const t=k/1600*6.28;const x=w/2+Math.sin(vals.f*t)*w*0.4,y=h/2-Math.sin(3*t+ts/500)*h*0.4;k?g.lineTo(x,y):g.moveTo(x,y);}g.stroke();}
+  if(ts-gapT>1000){const i=$('#info');
+    i.textContent=(ctx?['stato '+ctx.state,'sampleRate '+ctx.sampleRate,'baseLatency '+(ctx.baseLatency||0).toFixed(4)+' s','outputLatency '+(ctx.outputLatency!==undefined?ctx.outputLatency.toFixed(4)+' s':'n/d'),'motore '+O.eng+' · hint '+O.lat].join('\n'):'audio non avviato')+'\nrAF: intervallo max ultimo secondo '+maxGap.toFixed(0)+' ms (16.7 = fluido)';
+    maxGap=0;gapT=ts;}
+}
+$('#start').onclick=startAudio;
+$('#play').onclick=()=>{if(!ctx)return;playing=!playing;$('#play').classList.toggle('on',playing);$('#play').textContent=playing?'Suona (attivo)':'Suona';vals={...vals,a:LEV};pushLevel();};
+$('#stop').onclick=()=>{playing=false;$('#play').classList.remove('on');$('#play').textContent='Suona';pushLevel();};
+document.addEventListener('keydown',e=>{if(e.key==='Escape')$('#stop').click();});
+renderGroups();raf=requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
