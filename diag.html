@@ -44,7 +44,7 @@ button.sel{background:var(--a);color:var(--bg);border-color:var(--a)}
 const $=s=>document.querySelector(s);
 const O={eng:'nat-tc',lat:'playback',sr:'0',vis:false,busy:false,af:false,aa:false,ap:false,sil:false,out:'direct'};
 const GROUPS={
- 'g-eng':{k:'eng',o:[['nat-tc','Nativo setTargetAtTime'],['nat-ramp','Nativo linearRamp'],['worklet','AudioWorklet']]},
+ 'g-eng':{k:'eng',o:[['nat-tc','Nativo setTargetAtTime'],['nat-ramp','Nativo linearRamp'],['worklet','AudioWorklet'],['buf','Buffer in loop']]},
  'g-lat':{k:'lat',o:[['playback','playback'],['interactive','interactive'],['balanced','balanced']]},
  'g-out':{k:'out',o:[['direct','Diretta (destination)'],['stream','Via elemento audio']]},
  'g-sr':{k:'sr',o:[['0','default'],['44100','44100'],['48000','48000']]}
@@ -85,7 +85,12 @@ async function startAudio(){
     try{await ctx.audioWorklet.addModule(url);}catch(e){$('#info').textContent='worklet non disponibile: '+e;return;}finally{URL.revokeObjectURL(url);}
     node=new AudioWorkletNode(ctx,'p',{numberOfInputs:0,outputChannelCount:[2]});node.connect(master);
   }else{
-    osc=ctx.createOscillator();osc.frequency.value=vals.f;gain=ctx.createGain();gain.gain.value=0;
+    if(O.eng==='buf'){
+      const N=Math.round(ctx.sampleRate),b=ctx.createBuffer(1,N,ctx.sampleRate),d=b.getChannelData(0);
+      for(let k=0;k<N;k++)d[k]=Math.sin(2*Math.PI*k/N);
+      osc=ctx.createBufferSource();osc.buffer=b;osc.loop=true;osc.frequency=osc.playbackRate;osc.frequency.value=vals.f;
+    }else{osc=ctx.createOscillator();osc.frequency.value=vals.f;}
+    gain=ctx.createGain();gain.gain.value=0;
     osc.connect(gain);gain.connect(master);osc.start();
   }
   await rp;pushLevel(true);applyLoads();
