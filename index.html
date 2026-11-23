@@ -163,41 +163,57 @@ function makeNative(useBuf){
     }
   }};
 }
-/* m=file: file WAV stereo di 10 s generato qui e suonato in loop da un elemento <audio>,
-   come un brano qualsiasi. Ogni cambio di parametro rigenera il file: lì si sente uno stacco. */
-const WSR=44100,WSEC=10;
+/* Motore predefinito (m=file): file WAV stereo generato qui e suonato in loop da elementi <audio>,
+   come un brano qualsiasi. Su iPad Safari 16.7 l'audio in tempo reale fa click al tocco, questo no.
+   Il file dura 120 s (Safari lascia un piccolo buco a ogni ripartenza del loop). Frequenza arrotondata
+   a 0,1 Hz: in un blocco di 10 s ci sono cicli interi, il blocco si ripete senza salti.
+   A ogni cambio il file nuovo si prepara in un secondo lettore e parte quando e' pronto. */
+const WSR=22050,WBLK=10,WSEC=120,DEB=250;
 function wavURL(){
-  const n=WSR*WSEC,b=new ArrayBuffer(44+n*4),dv=new DataView(b);
+  const nb=WSR*WBLK,n=WSR*WSEC,b=new ArrayBuffer(44+n*4),dv=new DataView(b);
   const str=(o,t)=>{for(let k=0;k<t.length;k++)dv.setUint8(o+k,t.charCodeAt(k));};
   str(0,'RIFF');dv.setUint32(4,36+n*4,true);str(8,'WAVE');str(12,'fmt ');
   dv.setUint32(16,16,true);dv.setUint16(20,1,true);dv.setUint16(22,2,true);
   dv.setUint32(24,WSR,true);dv.setUint32(28,WSR*4,true);dv.setUint16(32,4,true);dv.setUint16(34,16,true);
   str(36,'data');dv.setUint32(40,n*4,true);
   const P=[0,1].map(i=>{const s=S[i];return {a:s.mute?0:lin(Math.min(s.a,AMAX)),w:2*Math.PI*Math.round(s.f*10)/10/WSR,ph:2*Math.PI*s.ph/360};});
-  const pcm=new Int16Array(b,44);
-  for(let k=0;k<n;k++){
-    pcm[2*k]=Math.round(32767*P[0].a*Math.sin(P[0].w*k+P[0].ph));
-    pcm[2*k+1]=Math.round(32767*P[1].a*Math.sin(P[1].w*k+P[1].ph));
+  const pcm=new Int32Array(b,44);
+  for(let k=0;k<nb;k++){
+    const l=Math.round(32767*P[0].a*Math.sin(P[0].w*k+P[0].ph)),r=Math.round(32767*P[1].a*Math.sin(P[1].w*k+P[1].ph));
+    pcm[k]=(l&0xffff)|(r<<16); /* un frame stereo little-endian in 32 bit */
   }
+  for(let o=nb;o<n;o+=nb)pcm.copyWithin(o,0,Math.min(nb,n-o));
   return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
 }
 function makeFile(){
-  const el=new Audio();el.loop=true;el.preload='auto';
-  let url=null,tmr=0;
+  const mk=()=>{const e=new Audio();e.loop=true;e.preload='auto';return e;};
+  const P=[mk(),mk()];
+  let cur=0,url=null,tmr=0,gen=0;
+  const silent=()=>S[0].mute&&S[1].mute;
+  const stopAll=()=>{gen++;P.forEach(e=>e.pause());};
   const load=()=>{
-    if(S[0].mute&&S[1].mute){el.pause();return;}
-    const old=url;url=wavURL();el.src=url;el.play().catch(()=>{});
-    if(old)setTimeout(()=>URL.revokeObjectURL(old),1000);
+    if(silent()){stopAll();return;}
+    const my=++gen,nx=P[1-cur],old=url;url=wavURL();
+    const go=()=>{
+      nx.removeEventListener('canplaythrough',go);
+      if(my!==gen)return;
+      nx.play().then(()=>{if(my!==gen){nx.pause();return;}P[cur].pause();cur=1-cur;}).catch(()=>{});
+      if(old)setTimeout(()=>URL.revokeObjectURL(old),2000);
+    };
+    nx.addEventListener('canplaythrough',go);
+    nx.src=url;nx.load();
   };
-  url=wavURL();el.src=url;el.play().catch(()=>{}); /* sblocco dentro il gesto */
+  /* sblocco dei due lettori dentro il gesto dell'utente (file muto) */
+  url=wavURL();
+  P.forEach(e=>{e.src=url;const p=e.play();if(p)p.then(()=>{if(silent())e.pause();}).catch(()=>{});});
   return {kind:'file',push(){
     clearTimeout(tmr);
-    if(S[0].mute&&S[1].mute){el.pause();return;}
-    tmr=setTimeout(load,250);
+    if(silent()){stopAll();return;}
+    tmr=setTimeout(load,DEB);
   }};
 }
 function push(i,snap){if(eng)eng.push(i,snap);}
-const MODE=(()=>{try{return new URLSearchParams(location.search).get('m')||'worklet';}catch(e){return 'worklet';}})();
+const MODE=(()=>{try{return new URLSearchParams(location.search).get('m')||'file';}catch(e){return 'file';}})();
 let starting=false;
 async function start(){
   if(starting)return;
