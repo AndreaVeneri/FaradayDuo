@@ -24,7 +24,13 @@ h1{font-size:18px;margin:0;flex:1;letter-spacing:.02em}
 button{font:inherit;font-weight:700;color:var(--fg);background:var(--pan);border:1px solid var(--line);border-radius:12px;min-height:52px;padding:0 18px;touch-action:manipulation}
 #go.on{background:var(--fg);color:var(--bg)}
 #stop{border-color:#8a3b3b;color:#ffb4b4}
-main{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+main{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:minmax(150px,27%) 1fr;grid-template-areas:"v v" "a b";gap:12px}
+#cA{grid-area:a}#cB{grid-area:b}
+.vis{grid-area:v;display:flex;gap:12px;min-height:0;min-width:0}
+.cv{flex:1;min-width:0;position:relative;background:var(--pan);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.cv canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.cv .ov{position:absolute;left:10px;top:6px;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums}
+@media (min-width:1100px){main{grid-template-columns:1fr 1.15fr 1fr;grid-template-rows:1fr;grid-template-areas:"a v b"}.vis{flex-direction:column}}
 .ch{--c:var(--a);background:var(--pan);border:1px solid var(--line);border-top:5px solid var(--c);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;justify-content:space-around;gap:6px;min-height:0;min-width:0}
 .ch.b{--c:var(--b)}
 .hd{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -43,7 +49,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
 input[type=range]::-moz-range-track{height:22px;border-radius:11px;background:#1e2d33;border:1px solid var(--line)}
 input[type=range]::-moz-range-thumb{width:50px;height:50px;border-radius:50%;background:var(--c);border:5px solid var(--bg)}
 button:focus-visible,input:focus-visible{outline:2px solid var(--c,var(--a));outline-offset:2px}
-@media (max-width:700px){main{grid-template-columns:1fr;overflow:auto}.ch{flex:none;gap:10px}html,body{overflow:auto}}
+@media (max-width:700px){main{grid-template-columns:1fr;grid-template-rows:none;grid-template-areas:"v" "a" "b";overflow:auto}.vis{height:200px}.ch{flex:none;gap:10px}html,body{overflow:auto}}
 </style>
 </head>
 <body>
@@ -53,7 +59,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--c,var(--a));out
   <button id="go" type="button">Avvia audio</button>
   <button id="stop" type="button">Muta tutto</button>
 </header>
-<main id="m"></main>
+<main id="m">
+  <div class="vis">
+    <div class="cv"><canvas id="scope"></canvas><span class="ov">Oscilloscopio</span></div>
+    <div class="cv"><canvas id="lis"></canvas><span class="ov" id="rt">Lissajous</span></div>
+  </div>
+</main>
 <script>
 (()=>{
 'use strict';
@@ -86,8 +97,11 @@ function push(i){
   v.g.gain.setTargetAtTime(s.mute?0:lin(Math.min(s.a,AMAX)),t,TCG);
   const tg=s.ph/360;let d=tg-v.off;d-=Math.round(d);
   if(Math.abs(d)>1e-6){
-    const cs=ctx.createConstantSource();cs.offset.value=d/NUDGE;cs.connect(v.o.frequency);
-    cs.start(t);cs.stop(t+NUDGE+0.02);cs.onended=()=>{try{cs.disconnect();}catch(e){}};
+    const cs=ctx.createConstantSource(),gn=ctx.createGain(),N=64,cv=new Float32Array(N);
+    for(let k=0;k<N;k++)cv[k]=(0.5-0.5*Math.cos(2*Math.PI*k/(N-1)))*2*d/NUDGE;
+    gn.gain.value=0;cs.connect(gn);gn.connect(v.o.frequency);
+    gn.gain.setValueCurveAtTime(cv,t,NUDGE);
+    cs.start(t);cs.stop(t+NUDGE+0.02);cs.onended=()=>{try{cs.disconnect();gn.disconnect();}catch(e){}};
     v.off=tg;
   }
 }
@@ -112,7 +126,7 @@ const els=[];
 function build(){
   const m=$('#m');
   [0,1].forEach(i=>{
-    const c=document.createElement('section');c.className='ch'+(i?' b':'');
+    const c=document.createElement('section');c.className='ch'+(i?' b':'');c.id=i?'cB':'cA';
     const hd=document.createElement('div');hd.className='hd';
     hd.innerHTML='<h2>'+(i?'Destro · B':'Sinistro · A')+'</h2>';
     const mb=document.createElement('button');mb.type='button';mb.className='mute';
@@ -145,6 +159,7 @@ function set(i,r,v){
   push(i);ui();
 }
 function ui(){
+  want();
   $('#go').textContent=on?'Audio attivo':'Avvia audio';
   $('#go').classList.toggle('on',on);
   $('#st').textContent=on?'attivo':'fermo · parte in silenzio';
@@ -159,7 +174,36 @@ function ui(){
     });
   });
 }
-build();ui();
+/* ---- visualizzatore: disegnato dai parametri, nessun legame con l'audio ---- */
+const cvS=$('#scope'),cvL=$('#lis'),gS=cvS.getContext('2d'),gL=cvL.getContext('2d');
+const COL=['#5cc8e8','#ff8c66'];
+let need=false;
+const amp=i=>Math.min(1,lin(Math.min(S[i].a,AMAX))/lin(AMAX));
+function fit(cv){const d=Math.min(window.devicePixelRatio||1,2),w=Math.round(cv.clientWidth*d),h=Math.round(cv.clientHeight*d);if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}}
+function rat(x){for(let d=1;d<=16;d++){const n=Math.round(x*d);if(n>=1&&Math.abs(n/d-x)<=0.002*x)return [n,d];}return null;}
+function draw(){
+  need=false;fit(cvS);fit(cvL);
+  let W=cvS.width,H=cvS.height;gS.clearRect(0,0,W,H);
+  gS.strokeStyle='#27383e';gS.lineWidth=1;gS.beginPath();gS.moveTo(0,H/2);gS.lineTo(W,H/2);gS.stroke();
+  const win=3/Math.min(S[0].f,S[1].f);
+  for(let i=0;i<2;i++){
+    const s=S[i],a=amp(i);
+    gS.globalAlpha=s.mute?0.25:1;gS.strokeStyle=COL[i];gS.lineWidth=2.5;gS.beginPath();
+    for(let x=0;x<=W;x+=2){const t=x/W*win,y=H/2-Math.sin(2*Math.PI*(s.f*t+s.ph/360))*a*H*0.42;x?gS.lineTo(x,y):gS.moveTo(x,y);}
+    gS.stroke();
+  }
+  gS.globalAlpha=1;
+  W=cvL.width;H=cvL.height;gL.clearRect(0,0,W,H);
+  gL.strokeStyle='#27383e';gL.lineWidth=1;gL.beginPath();gL.moveTo(0,H/2);gL.lineTo(W,H/2);gL.moveTo(W/2,0);gL.lineTo(W/2,H);gL.stroke();
+  const r=rat(S[1].f/S[0].f),T=r?r[1]/S[0].f:3/S[0].f,sc=Math.min(W,H)*0.42,ax=amp(0),ay=amp(1);
+  gL.globalAlpha=(S[0].mute||S[1].mute)?0.3:1;gL.strokeStyle='#e6f0f2';gL.lineWidth=2;gL.beginPath();
+  for(let k=0;k<=1600;k++){const t=k/1600*T,x=W/2+Math.sin(2*Math.PI*(S[0].f*t+S[0].ph/360))*ax*sc,y=H/2-Math.sin(2*Math.PI*(S[1].f*t+S[1].ph/360))*ay*sc;k?gL.lineTo(x,y):gL.moveTo(x,y);}
+  gL.stroke();gL.globalAlpha=1;
+  $('#rt').textContent='Lissajous · B/A '+(r?r[0]+':'+r[1]:(S[1].f/S[0].f).toFixed(3));
+}
+const want=()=>{if(!need){need=true;requestAnimationFrame(draw);}};
+window.addEventListener('resize',want);
+build();ui();want();
 $('#go').onclick=start;
 $('#stop').onclick=muteAll;
 document.addEventListener('keydown',e=>{if(e.key==='Escape')muteAll();});
