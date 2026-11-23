@@ -25,6 +25,7 @@ button.sel{background:var(--a);color:var(--bg);border-color:var(--a)}
 
 <fieldset><legend>Motore</legend><div id="g-eng"></div></fieldset>
 <fieldset><legend>Latenza (latencyHint)</legend><div id="g-lat"></div></fieldset>
+<fieldset><legend>Uscita</legend><div id="g-out"></div></fieldset>
 <fieldset><legend>Sample rate</legend><div id="g-sr"></div></fieldset>
 <fieldset><legend>Carico e test automatici</legend><div id="g-t"></div></fieldset>
 
@@ -41,10 +42,11 @@ button.sel{background:var(--a);color:var(--bg);border-color:var(--a)}
 (()=>{
 'use strict';
 const $=s=>document.querySelector(s);
-const O={eng:'nat-tc',lat:'playback',sr:'0',vis:false,busy:false,af:false,aa:false,ap:false,sil:false};
+const O={eng:'nat-tc',lat:'playback',sr:'0',vis:false,busy:false,af:false,aa:false,ap:false,sil:false,out:'direct'};
 const GROUPS={
  'g-eng':{k:'eng',o:[['nat-tc','Nativo setTargetAtTime'],['nat-ramp','Nativo linearRamp'],['worklet','AudioWorklet']]},
  'g-lat':{k:'lat',o:[['playback','playback'],['interactive','interactive'],['balanced','balanced']]},
+ 'g-out':{k:'out',o:[['direct','Diretta (destination)'],['stream','Via elemento audio']]},
  'g-sr':{k:'sr',o:[['0','default'],['44100','44100'],['48000','48000']]}
 };
 const TOGGLES=[['sil','Silenzio (gain 0): solo il tocco'],['vis','Visualizzatore attivo'],['busy','Carico main thread (30 ms ogni 100 ms)'],['af','Auto: frequenza ogni 300 ms'],['aa','Auto: ampiezza ogni 300 ms'],['ap','Auto: fase ogni 300 ms']];
@@ -55,7 +57,7 @@ function renderGroups(){
   const t=$('#g-t');t.textContent='';
   TOGGLES.forEach(([k,l])=>btn(t,l,O[k],()=>{O[k]=!O[k];renderGroups();applyLoads();if(k==='sil'&&ctx)pushLevel();}));
 }
-let ctx=null,master=null,eng=null,playing=false,node=null,osc=null,gain=null,vals={f:40,a:0.0316,ph:0};
+let aud=null,ctx=null,master=null,eng=null,playing=false,node=null,osc=null,gain=null,vals={f:40,a:0.0316,ph:0};
 const LEV=Math.pow(10,-30/20);
 function wbody(){
   class P extends AudioWorkletProcessor{
@@ -74,7 +76,9 @@ async function startAudio(){
   const AC=window.AudioContext||window.webkitAudioContext;
   const opt={latencyHint:O.lat};if(O.sr!=='0')opt.sampleRate=+O.sr;
   try{ctx=new AC(opt);}catch(e){ctx=new AC({latencyHint:O.lat});}
-  master=ctx.createGain();master.gain.value=1;master.connect(ctx.destination);
+  master=ctx.createGain();master.gain.value=1;
+  if(O.out==='stream'){const d=ctx.createMediaStreamDestination();master.connect(d);aud=new Audio();aud.srcObject=d.stream;aud.play().catch(e=>{$('#info').textContent='audio el: '+e;});}
+  else master.connect(ctx.destination);
   const rp=ctx.resume();
   if(O.eng==='worklet'){
     const url=URL.createObjectURL(new Blob(['('+wbody+')()'],{type:'application/javascript'}));
@@ -87,6 +91,7 @@ async function startAudio(){
   await rp;pushLevel(true);applyLoads();
 }
 function stopAudio(){playing=false;$('#play').classList.remove('on');$('#play').textContent='Suona';
+  try{if(aud){aud.pause();aud.srcObject=null;aud=null;}}catch(e){}
   try{if(ctx)ctx.close();}catch(e){}ctx=master=node=osc=gain=null;}
 function level(){return playing&&!O.sil?vals.a:0;}
 function pushLevel(snap){
@@ -127,7 +132,7 @@ function frame(ts){
     g.clearRect(0,0,w,h);g.strokeStyle='#5cc8e8';g.lineWidth=2;g.beginPath();
     for(let k=0;k<=1600;k++){const t=k/1600*6.28;const x=w/2+Math.sin(vals.f*t)*w*0.4,y=h/2-Math.sin(3*t+ts/500)*h*0.4;k?g.lineTo(x,y):g.moveTo(x,y);}g.stroke();}
   if(ts-gapT>1000){const i=$('#info');
-    i.textContent=(ctx?['stato '+ctx.state,'sampleRate '+ctx.sampleRate,'baseLatency '+(ctx.baseLatency||0).toFixed(4)+' s','outputLatency '+(ctx.outputLatency!==undefined?ctx.outputLatency.toFixed(4)+' s':'n/d'),'motore '+O.eng+' · hint '+O.lat].join('\n'):'audio non avviato')+'\nrAF: intervallo max ultimo secondo '+maxGap.toFixed(0)+' ms (16.7 = fluido)';
+    i.textContent=(ctx?['stato '+ctx.state,'sampleRate '+ctx.sampleRate,'baseLatency '+(ctx.baseLatency||0).toFixed(4)+' s','outputLatency '+(ctx.outputLatency!==undefined?ctx.outputLatency.toFixed(4)+' s':'n/d'),'motore '+O.eng+' · hint '+O.lat+' · uscita '+O.out].join('\n'):'audio non avviato')+'\nrAF: intervallo max ultimo secondo '+maxGap.toFixed(0)+' ms (16.7 = fluido)';
     maxGap=0;gapT=ts;}
 }
 $('#start').onclick=startAudio;
