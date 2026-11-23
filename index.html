@@ -130,49 +130,99 @@ async function makeWorklet(){
     node.port.postMessage({i,f:s.f,a:s.mute?0:lin(Math.min(s.a,AMAX)),ph:s.ph/360,cap:CAP,snap:!!snap});
   }};
 }
-/* Ripiego se AudioWorklet non c'e': oscillatori nativi, fase con piccolo spostamento di frequenza. */
-function makeNative(){
+/* Nodi nativi: oscillatore (m=nativo) o buffer di seno in loop (m=buffer).
+   Fase con piccolo spostamento di frequenza. */
+function makeNative(useBuf){
   const mg=ctx.createChannelMerger(2);mg.connect(master);
   const t0=ctx.currentTime+0.05;
+  let buf=null;
+  if(useBuf){
+    const N=Math.round(ctx.sampleRate);buf=ctx.createBuffer(1,N,ctx.sampleRate);
+    const d=buf.getChannelData(0);for(let k=0;k<N;k++)d[k]=Math.sin(2*Math.PI*k/N);
+  }
   const V=[0,1].map(i=>{
-    const o=ctx.createOscillator();o.type='sine';o.frequency.value=S[i].f;
+    let o,p;
+    if(buf){o=ctx.createBufferSource();o.buffer=buf;o.loop=true;p=o.playbackRate;}
+    else{o=ctx.createOscillator();o.type='sine';p=o.frequency;}
+    p.value=S[i].f;
     const g=ctx.createGain();g.gain.value=0;o.connect(g);g.connect(mg,0,i);o.start(t0);
-    return {o,g,off:0};
+    return {p,g,off:0};
   });
-  return {kind:'native',push(i){
+  return {kind:buf?'buffer':'nativo',push(i){
     const v=V[i],s=S[i],t=ctx.currentTime;
-    v.o.frequency.setTargetAtTime(s.f,t,TCF);
+    v.p.setTargetAtTime(s.f,t,TCF);
     v.g.gain.setTargetAtTime(s.mute?0:lin(Math.min(s.a,AMAX)),t,TCG);
     const tg=s.ph/360;let d=tg-v.off;d-=Math.round(d);
     if(Math.abs(d)>1e-6){
       const cs=ctx.createConstantSource(),gn=ctx.createGain(),N=64,cv=new Float32Array(N);
       for(let k=0;k<N;k++)cv[k]=(0.5-0.5*Math.cos(2*Math.PI*k/(N-1)))*2*d/NUDGE;
-      gn.gain.value=0;cs.connect(gn);gn.connect(v.o.frequency);
+      gn.gain.value=0;cs.connect(gn);gn.connect(v.p);
       gn.gain.setValueCurveAtTime(cv,t,NUDGE);
       cs.start(t);cs.stop(t+NUDGE+0.02);cs.onended=()=>{try{cs.disconnect();gn.disconnect();}catch(e){}};
       v.off=tg;
     }
   }};
 }
+/* m=file: file WAV stereo di 10 s generato qui e suonato in loop da un elemento <audio>,
+   come un brano qualsiasi. Ogni cambio di parametro rigenera il file: lì si sente uno stacco. */
+const WSR=44100,WSEC=10;
+function wavURL(){
+  const n=WSR*WSEC,b=new ArrayBuffer(44+n*4),dv=new DataView(b);
+  const str=(o,t)=>{for(let k=0;k<t.length;k++)dv.setUint8(o+k,t.charCodeAt(k));};
+  str(0,'RIFF');dv.setUint32(4,36+n*4,true);str(8,'WAVE');str(12,'fmt ');
+  dv.setUint32(16,16,true);dv.setUint16(20,1,true);dv.setUint16(22,2,true);
+  dv.setUint32(24,WSR,true);dv.setUint32(28,WSR*4,true);dv.setUint16(32,4,true);dv.setUint16(34,16,true);
+  str(36,'data');dv.setUint32(40,n*4,true);
+  const P=[0,1].map(i=>{const s=S[i];return {a:s.mute?0:lin(Math.min(s.a,AMAX)),w:2*Math.PI*Math.round(s.f*10)/10/WSR,ph:2*Math.PI*s.ph/360};});
+  const pcm=new Int16Array(b,44);
+  for(let k=0;k<n;k++){
+    pcm[2*k]=Math.round(32767*P[0].a*Math.sin(P[0].w*k+P[0].ph));
+    pcm[2*k+1]=Math.round(32767*P[1].a*Math.sin(P[1].w*k+P[1].ph));
+  }
+  return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
+}
+function makeFile(){
+  const el=new Audio();el.loop=true;el.preload='auto';
+  let url=null,tmr=0;
+  const load=()=>{
+    if(S[0].mute&&S[1].mute){el.pause();return;}
+    const old=url;url=wavURL();el.src=url;el.play().catch(()=>{});
+    if(old)setTimeout(()=>URL.revokeObjectURL(old),1000);
+  };
+  url=wavURL();el.src=url;el.play().catch(()=>{}); /* sblocco dentro il gesto */
+  return {kind:'file',push(){
+    clearTimeout(tmr);
+    if(S[0].mute&&S[1].mute){el.pause();return;}
+    tmr=setTimeout(load,250);
+  }};
+}
 function push(i,snap){if(eng)eng.push(i,snap);}
+const MODE=(()=>{try{return new URLSearchParams(location.search).get('m')||'worklet';}catch(e){return 'worklet';}})();
 let starting=false;
 async function start(){
   if(starting)return;
   starting=true;
   try{
-    if(!ctx){
-      const AC=window.AudioContext||window.webkitAudioContext;
-      try{if(navigator.audioSession)navigator.audioSession.type='playback';}catch(e){}
-      ctx=new AC({latencyHint:'playback'});
-      master=ctx.createGain();master.gain.value=0;master.connect(ctx.destination);
+    if(MODE==='file'){
+      if(!eng)eng=makeFile();
+    }else{
+      if(!ctx){
+        const AC=window.AudioContext||window.webkitAudioContext;
+        try{if(navigator.audioSession)navigator.audioSession.type='playback';}catch(e){}
+        ctx=new AC({latencyHint:'playback'});
+        master=ctx.createGain();master.gain.value=0;master.connect(ctx.destination);
+      }
+      const rp=ctx.resume(); /* subito, dentro il gesto dell'utente */
+      if(!eng){
+        if(MODE==='nativo')eng=makeNative(false);
+        else if(MODE==='buffer')eng=makeNative(true);
+        else{try{eng=await makeWorklet();}catch(e){eng=makeNative(false);}}
+        push(0,true);push(1,true);
+      }
+      await rp;
+      master.gain.setTargetAtTime(1,ctx.currentTime,0.08);
     }
-    const rp=ctx.resume(); /* subito, dentro il gesto dell'utente */
-    if(!eng){
-      try{eng=await makeWorklet();}catch(e){eng=makeNative();}
-      push(0,true);push(1,true);
-    }
-    await rp;
-    on=true;master.gain.setTargetAtTime(1,ctx.currentTime,0.08);
+    on=true;
     push(0);push(1);
   }catch(e){$('#st').textContent='audio non disponibile';starting=false;return;}
   starting=false;
@@ -226,7 +276,7 @@ function ui(only){
   want();
   $('#go').textContent=on?'Audio attivo':'Avvia audio';
   $('#go').classList.toggle('on',on);
-  $('#st').textContent=on?'attivo':'fermo · parte in silenzio';
+  $('#st').textContent=on?'attivo · '+eng.kind:'fermo · parte in silenzio';
   [0,1].forEach(i=>{
     if(only!==undefined&&only!==i)return;
     const e=els[i],s=S[i];
