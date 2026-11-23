@@ -213,7 +213,23 @@ function makeFile(){
   }};
 }
 function push(i,snap){if(eng)eng.push(i,snap);}
-const MODE=(()=>{try{return new URLSearchParams(location.search).get('m')||'file';}catch(e){return 'file';}})();
+const QS=(()=>{try{return new URLSearchParams(location.search);}catch(e){return null;}})();
+const MODE=(QS&&QS.get('m'))||'file';
+/* Prove per il tempo reale (x=keep,stream,inter, anche combinate con la virgola):
+   keep   = un file muto suona in loop accanto, cosi' iOS tiene la sessione audio da "brano"
+   stream = l'audio in tempo reale esce da un elemento <audio> invece che dall'uscita diretta
+   inter  = latencyHint 'interactive' invece di 'playback' */
+const X=((QS&&QS.get('x'))||'').split(',').filter(Boolean);
+let keepEl=null,streamEl=null;
+function silentURL(){
+  const n=WSR,b=new ArrayBuffer(44+n*4),dv=new DataView(b);
+  const str=(o,t)=>{for(let k=0;k<t.length;k++)dv.setUint8(o+k,t.charCodeAt(k));};
+  str(0,'RIFF');dv.setUint32(4,36+n*4,true);str(8,'WAVE');str(12,'fmt ');
+  dv.setUint32(16,16,true);dv.setUint16(20,1,true);dv.setUint16(22,2,true);
+  dv.setUint32(24,WSR,true);dv.setUint32(28,WSR*4,true);dv.setUint16(32,4,true);dv.setUint16(34,16,true);
+  str(36,'data');dv.setUint32(40,n*4,true);
+  return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
+}
 let starting=false;
 async function start(){
   if(starting)return;
@@ -225,8 +241,13 @@ async function start(){
       if(!ctx){
         const AC=window.AudioContext||window.webkitAudioContext;
         try{if(navigator.audioSession)navigator.audioSession.type='playback';}catch(e){}
-        ctx=new AC({latencyHint:'playback'});
-        master=ctx.createGain();master.gain.value=0;master.connect(ctx.destination);
+        ctx=new AC({latencyHint:X.includes('inter')?'interactive':'playback'});
+        master=ctx.createGain();master.gain.value=0;
+        if(X.includes('stream')&&ctx.createMediaStreamDestination){
+          const d=ctx.createMediaStreamDestination();master.connect(d);
+          streamEl=new Audio();streamEl.srcObject=d.stream;streamEl.play().catch(()=>{});
+        }else master.connect(ctx.destination);
+        if(X.includes('keep')){keepEl=new Audio(silentURL());keepEl.loop=true;keepEl.play().catch(()=>{});}
       }
       const rp=ctx.resume(); /* subito, dentro il gesto dell'utente */
       if(!eng){
@@ -292,7 +313,7 @@ function ui(only){
   want();
   $('#go').textContent=on?'Audio attivo':'Avvia audio';
   $('#go').classList.toggle('on',on);
-  $('#st').textContent=on?'attivo · '+eng.kind:'fermo · parte in silenzio';
+  $('#st').textContent=on?'attivo · '+eng.kind+(X.length&&MODE!=='file'?' · '+X.join('+'):''):'fermo · parte in silenzio';
   [0,1].forEach(i=>{
     if(only!==undefined&&only!==i)return;
     const e=els[i],s=S[i];
